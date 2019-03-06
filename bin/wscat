@@ -13,6 +13,8 @@ const read = require('read');
 const readline = require('readline');
 const tty = require('tty');
 const WebSocket = require('ws');
+const awsv4 = require('aws-signature-v4');
+const { URL } = require('url');
 
 /**
  * InputReader - processes console input.
@@ -128,6 +130,7 @@ program
     '--auth <username:password>',
     'Add basic HTTP authentication header. (--connect only)'
   )
+  .option('--awsv4', 'Sign request with an AWS v4 Signature')
   .option('--ca <ca>', 'Specify a Certificate Authority (--connect only)')
   .option('--cert <cert>', 'Specify a Client SSL Certificate (--connect only)')
   .option(
@@ -227,10 +230,6 @@ if (program.listen) {
       return acc;
     }, {});
 
-    if (program.auth) {
-      headers.Authorization =
-        'Basic ' + Buffer.from(program.auth).toString('base64');
-    }
     if (program.host) headers.Host = program.host;
     if (program.protocol) options.protocolVersion = +program.protocol;
     if (program.origin) options.origin = program.origin;
@@ -244,7 +243,85 @@ if (program.listen) {
       connectUrl = `ws://${connectUrl}`;
     }
 
+    if (program.auth) {
+      headers.Authorization =
+        'Basic ' + Buffer.from(program.auth).toString('base64');
+    }
+    if (program.awsv4) {
+      let url = new URL(connectUrl);
+
+      let date = new Date();
+      let dateString = date.toISOString().replace(/[:\-]|\.\d{3}/g, "");
+      headers['X-Amz-Date'] = dateString;
+
+      headers.Host = url.hostname;
+
+      // TODO move this after the signature?
+      if (process.env.AWS_SESSION_TOKEN) {
+        headers['X-Amz-Security-Token'] = process.env.AWS_SESSION_TOKEN;
+      }
+
+      var canonicalRequest = awsv4.createCanonicalRequest(
+          'GET',
+          url.pathname,
+          url.query,
+          headers,
+          // empty string
+          ''
+        );
+
+      console.log("canonical request: \n" + canonicalRequest + "\n\n");
+
+      var region = process.env.AWS_REGION;
+      var service = 'execute-api';
+
+      var stringToSign = awsv4.createStringToSign(
+          date,
+          region,
+          service,
+          canonicalRequest
+        );
+
+      console.log("stringToSign: \n" + stringToSign + "\n\n");
+
+      var signature = awsv4.createSignature(
+          process.env.AWS_SECRET_ACCESS_KEY,
+          date,
+          region,
+          service,
+          stringToSign
+        );
+
+      // 20150830/us-east-1/iam/aws4_request
+      function ScopeDate(date) {
+        function pad(number) {
+          if (number < 10) {
+            return '0' + number;
+          }
+          return number;
+        }
+
+        return date.getFullYear().toString() + pad(date.getMonth() + 1) + pad(date.getDate());
+      }
+      var scope = ScopeDate(date) + '/' + region + '/' + service + '/' + 'aws4_request';
+
+      var authorization = awsv4.createAuthorizationHeader(
+          process.env.AWS_ACCESS_KEY_ID,
+          scope,
+          awsv4.createSignedHeaders(headers),
+          signature
+        );
+
+      console.log("authorization: \n" + authorization + "\n\n");
+
+      headers.Authorization = authorization;
+    }
+
     options.headers = headers;
+
+    console.log(connectUrl);
+    console.log(options);
+
     const ws = new WebSocket(connectUrl, program.subprotocol, options);
 
     ws.on('open', () => {
